@@ -427,6 +427,17 @@ func _open_pause() -> void:
 		menu.open_pause()
 
 # --- колбэки из menu_ui ---
+func menu_start() -> void:
+	var f = File.new()
+	if f.open("user://menu_start.log", File.WRITE):
+		f.store_line("menu_start called at " + str(OS.get_unix_time()))
+		f.close()
+	_start_game()
+
+func menu_controls() -> void:
+	if menu != null:
+		menu.open_controls()
+
 func menu_resume() -> void:
 	paused = false
 	_world_set_paused(false)
