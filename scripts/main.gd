@@ -28,12 +28,13 @@ const EnemySc = preload("res://scripts/enemy.gd")
 const PowerupSc = preload("res://scripts/powerup.gd")
 const FxSc = preload("res://scripts/fx.gd")
 const StarfieldSc = preload("res://scripts/starfield.gd")
+const MenuUiSc = preload("res://scripts/menu_ui.gd")
 
-# аудио (CC0): Kenney Sci-Fi Sounds / Interface Sounds; музыка yd/XCVG (opengameart.org)
-# SFX — WAV (AudioStreamSample): loop_mode принудительно выключен в _sfx().
-# Музыка — OGG (loop=true в импорте, зациклена намеренно).
+# аудио: SFX — WAV (AudioStreamSample), loop_mode выключен в _sfx(); музыка — OGG.
+# Меню-музыка: yd/XCVG ambient (OpenGameArt). Боевая: Bensound — House,
+# лицензия: assets/audio/Bensound_House_LICENSE.txt (bensound.com, RKTVGSVKAAHGUL1P).
 const S_MENU = preload("res://assets/audio/bgm_menu.ogg")
-const S_BATTLE = preload("res://assets/audio/bgm_battle.ogg")
+const S_BATTLE = preload("res://assets/audio/bgm_battle_house.ogg")
 const S_SHOOT = preload("res://assets/audio/sfx_player_shoot.wav")
 const S_ESHOOT = preload("res://assets/audio/sfx_enemy_shoot.wav")
 const S_BOOM_S = preload("res://assets/audio/sfx_boom_small.wav")
@@ -76,6 +77,16 @@ var flash_rect
 var music
 var sfx_pool = []
 
+# меню и настройки
+var menu
+var music_on = true
+# диагностический прогон UI (NV_WALK=1): титул -> старт -> гибель -> game over -> выход
+var walk = false
+var walk_started = false
+var walk_t = 0.0
+var walk_file = null
+var walk_over_logged = false
+
 # --- диагностика аудио (NV_SELFTEST=1): пишет user://audiotest.log ---
 var st_file = null
 var st_list = []
@@ -100,8 +111,10 @@ func get_player_pos():
 func _ready():
 	randomize()
 	selftest = OS.get_environment("NV_SELFTEST") == "1"
+	walk = OS.get_environment("NV_WALK") == "1"
 	_register_actions()
 	_hi_load()
+	_settings_load()
 
 	# текстурированный фон (добавляется первым — рисуется позади всех)
 	var bg = BgSc.new()
@@ -220,13 +233,12 @@ func _ready():
 	flash_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_layer.add_child(flash_rect)
 
-	# аудио: фоновая музыка + пул SFX-плееров
+	# аудио: фоновый плеер + пул SFX (старт музыки — в _enter_title/_start_game)
 	music = AudioStreamPlayer.new()
 	music.stream = S_MENU
 	music.volume_db = -7.0
 	add_child(music)
 	music.connect("finished", self, "_on_music_finished")
-	music.play()
 	for i in range(16):
 		var sp = AudioStreamPlayer.new()
 		sp.volume_db = -2.0
@@ -238,9 +250,15 @@ func _ready():
 	world.add_child(player)
 	player.init(self, Vector2(VW / 2.0, VH - 100.0))
 
+	# меню-интерфейс (CanvasLayer поверх HUD)
+	menu = MenuUiSc.new()
+	add_child(menu)
+	menu.setup(self)
+	menu.music_on = music_on
+
 	# состояние
 	state = STATE_TITLE
-	_show_title()
+	_enter_title()
 
 func _add_action(name):
 	if not InputMap.has_action(name):
@@ -253,22 +271,30 @@ func _add_key(name, code):
 	ev.scancode = code
 	InputMap.action_add_event(name, ev)
 
+func _add_key_events(name, codes) -> void:
+	_add_action(name)
+	for c in codes:
+		var ev = InputEventKey.new()
+		ev.scancode = c
+		InputMap.action_add_event(name, ev)
+
 func _register_actions() -> void:
-	# движение WASD
-	_add_key("move_left", KEY_A)
-	_add_key("move_right", KEY_D)
-	_add_key("move_up", KEY_W)
-	_add_key("move_down", KEY_S)
-	# старт/пауза
-	_add_action("start")
-	var space = InputEventKey.new()
-	space.scancode = KEY_SPACE
-	InputMap.action_add_event("start", space)
-	# огонь: мышь + пробел
+	# движение: WASD + стрелки
+	_add_key_events("move_left", [KEY_A, KEY_LEFT])
+	_add_key_events("move_right", [KEY_D, KEY_RIGHT])
+	_add_key_events("move_up", [KEY_W, KEY_UP])
+	_add_key_events("move_down", [KEY_S, KEY_DOWN])
+	# пауза: Esc + P
+	_add_key_events("pause_game", [KEY_ESCAPE, KEY_P])
+	# старт/выбор: Space + Enter
+	_add_key_events("start", [KEY_SPACE, KEY_ENTER])
+	# огонь: мышь (ЛКМ) + пробел
 	_add_action("fire")
 	var mouse = InputEventMouseButton.new()
 	mouse.button_index = BUTTON_LEFT
 	InputMap.action_add_event("fire", mouse)
+	var space = InputEventKey.new()
+	space.scancode = KEY_SPACE
 	InputMap.action_add_event("fire", space)
 
 func _hi_load() -> void:
@@ -290,19 +316,40 @@ func _hi_save() -> void:
 	f.store_line(str(hi))
 	f.close()
 
+func _settings_load() -> void:
+	music_on = true
+	var f = File.new()
+	if f.file_exists("user://settings.save"):
+		f.open("user://settings.save", File.READ)
+		var s = f.get_line().strip_edges()
+		f.close()
+		if s.begins_with("music_on="):
+			music_on = int(s.get_slice("=", 1)) != 0
+
+func _settings_save() -> void:
+	var f = File.new()
+	f.open("user://settings.save", File.WRITE)
+	f.store_line("music_on=" + str(int(music_on)))
+	f.close()
+
 func _set_flash(a) -> void:
 	flash_rect.color = Color(1, 0, 0, a)
 
 func _on_music_finished() -> void:
-	if music != null:
+	if music != null and music_on:
 		music.play()
 
 func _play_music(stream) -> void:
+	# ставим нужный трек всегда (чтобы при включении звука заиграл правильный);
+	# играет только если музыка включена.
 	if music == null:
 		return
 	if music.stream != stream:
 		music.stream = stream
-	music.play()
+	if music_on:
+		music.play()
+	else:
+		music.stop()
 
 # --- SFX ---
 func _sfx(stream, vol, pitch) -> void:
@@ -344,17 +391,24 @@ func sfx_pickup() -> void:
 func sfx_ui() -> void:
 	_sfx(S_UI, -8.0, 1.0)
 
-func _show_title() -> void:
-	label_title.visible = true
-	label_start.visible = true
+func _enter_title() -> void:
+	# титульный экран: мир заморожен, HUD скрыт, открыто неоновое меню
+	state = STATE_TITLE
+	paused = false
+	_world_set_paused(true)
+	label_title.visible = false
+	label_start.visible = false
 	label_pause.visible = false
 	label_game_over.visible = false
 	label_score.visible = false
 	label_lives.visible = false
 	label_hi.visible = false
 	_set_flash(0.0)
+	if menu != null:
+		menu.open_main()
+	_play_music(S_MENU)
 
-func _show_play() -> void:
+func _enter_play_ui() -> void:
 	label_title.visible = false
 	label_start.visible = false
 	label_pause.visible = false
@@ -364,25 +418,56 @@ func _show_play() -> void:
 	label_hi.visible = true
 	_set_flash(0.0)
 
-func _show_over() -> void:
-	label_title.visible = false
-	label_start.visible = false
-	label_pause.visible = false
-	label_game_over.visible = true
-	label_score.visible = false
-	label_lives.visible = false
-	label_hi.visible = false
-	_set_flash(0.0)
+func _open_pause() -> void:
+	if state != STATE_PLAY or paused:
+		return
+	paused = true
+	_world_set_paused(true)
+	if menu != null:
+		menu.open_pause()
 
-func _toggle_pause() -> void:
-	sfx_ui()
-	paused = not paused
-	if paused:
-		_world_set_paused(true)
-		label_pause.visible = true
-	else:
-		_world_set_paused(false)
-		label_pause.visible = false
+# --- колбэки из menu_ui ---
+func menu_resume() -> void:
+	paused = false
+	_world_set_paused(false)
+	if menu != null:
+		menu.close()
+
+func menu_restart() -> void:
+	paused = false
+	_start_game()
+
+func menu_to_menu() -> void:
+	# сброс игрока и очистка мира, затем титул
+	for c in world.get_children():
+		if c != player:
+			c.queue_free()
+	for c in fx_container.get_children():
+		c.queue_free()
+	player.global_position = Vector2(VW / 2.0, VH - 100.0)
+	player.rotation = PI / 2.0
+	player.alive = true
+	player.hp = player.max_hp
+	player.iframes = 0.0
+	player.shield = false
+	player.fire_cd = 0.0
+	player.spread = 0.0
+	player.rapid = 0.0
+	player.time = 0.0
+	_enter_title()
+
+func menu_quit() -> void:
+	get_tree().quit()
+
+func menu_toggle_music(on) -> void:
+	music_on = on
+	_settings_save()
+	if music != null:
+		if music_on:
+			if not music.playing:
+				music.play()
+		else:
+			music.stop()
 
 func _world_set_paused(p) -> void:
 	# приостановить/восстановить обработку мира и fx
@@ -452,10 +537,18 @@ func _hurt_player(pos) -> void:
 		sfx_hurt()
 	else:
 		_spawn_fx(FxSc.Kind.SPARKS, pos, Color(1, 0.5, 0, 0.9), 0.9)
-		state = STATE_OVER
-		_show_over()
-		_hi_save()
 		sfx_boom_big()
+		# рекорд
+		var is_rec = false
+		if score > hi:
+			hi = score
+			is_rec = true
+			_hi_save()
+		# экран game over через меню
+		state = STATE_OVER
+		_world_set_paused(true)
+		if menu != null:
+			menu.open_over(score, is_rec)
 		_play_music(S_MENU)
 
 func _collect_powerup(p) -> void:
@@ -562,6 +655,9 @@ func _process(delta) -> void:
 	if selftest:
 		_selftest_process(delta)
 		return
+	if walk:
+		_walk_process(delta)
+		return
 
 	# затухание вспышки и в остальных состояниях
 	if flash_rect.color.a > 0.0:
@@ -570,21 +666,44 @@ func _process(delta) -> void:
 			na = 0.0
 		_set_flash(na)
 
-	if paused:
-		if Input.is_action_just_pressed("ui_cancel"):
-			_toggle_pause()
+	# пока открыто меню — вводом занимается menu_ui
+	if menu != null and menu.is_open():
 		return
 
-	if state == STATE_TITLE:
-		if Input.is_action_just_pressed("start"):
-			_start_game()
-	elif state == STATE_PLAY:
+	if state == STATE_PLAY:
 		_game_update(delta)
-		if Input.is_action_just_pressed("ui_cancel"):
-			_toggle_pause()
-	elif state == STATE_OVER:
-		if Input.is_action_just_pressed("start"):
-			_start_game()
+		if Input.is_action_just_pressed("pause_game"):
+			_open_pause()
+
+func _walk_process(delta) -> void:
+	# авто-прогон UI (NV_WALK=1): титул -> старт -> гибель -> game over -> выход
+	walk_t += delta
+	if walk_file == null:
+		walk_file = File.new()
+		walk_file.open("user://uiwalk.log", File.WRITE)
+		walk_file.store_line("NV_WALK begin (boot + menu ok)")
+	if walk_t > 0.8 and not walk_started:
+		walk_started = true
+		_start_game()
+		if walk_file != null:
+			walk_file.store_line("start_game ok -> battle music on")
+	elif walk_started and state == STATE_PLAY and walk_t > 1.5:
+		score = 150
+		label_score.text = "SCORE: 150"
+		lives = 1
+		_hurt_player(player.global_position)
+		if walk_file != null:
+			walk_file.store_line("damage applied, lives=" + str(lives))
+	if state == STATE_OVER and not walk_over_logged:
+		walk_over_logged = true
+		if walk_file != null:
+			walk_file.store_line("game over screen open, hi=" + str(hi))
+	if walk_t > 2.6:
+		if walk_file != null:
+			walk_file.store_line("NV_WALK done")
+			walk_file.close()
+			walk_file = null
+		get_tree().quit()
 
 func _start_game() -> void:
 	state = STATE_PLAY
@@ -621,9 +740,12 @@ func _start_game() -> void:
 	player.rapid = 0.0
 	player.time = 0.0
 
+	_world_set_paused(false)
+	if menu != null:
+		menu.close()
+	_enter_play_ui()
 	_play_music(S_BATTLE)
 	sfx_ui()
-	_show_play()
 
 # --- диагностика аудио: один прогон каждого SFX на отдельном плеере ---
 func _selftest_begin() -> void:

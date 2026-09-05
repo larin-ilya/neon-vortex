@@ -1,0 +1,15 @@
+[remap]
+
+importer="ogg_vorbis"
+type="AudioStreamOGGVorbis"
+path="res://.import/bgm_battle_house.ogg-b738b29a1d9e64bd37e7d7758d1417cd.oggstr"
+
+[deps]
+
+source_file="res://assets/audio/bgm_battle_house.ogg"
+dest_files=[ "res://.import/bgm_battle_house.ogg-b738b29a1d9e64bd37e7d7758d1417cd.oggstr" ]
+
+[params]
+
+loop=true
+loop_offset=0
